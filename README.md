@@ -47,3 +47,9 @@ npm run start:all
 ## API Key
 
 The Weatherstack API key is configured in `server.js`.
+
+## Credits
+
+From Tejas R Gowda
+
+
