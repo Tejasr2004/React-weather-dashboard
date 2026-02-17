@@ -1,23 +1,19 @@
 import express from 'express';
 import cors from 'cors';
 import axios from 'axios';
-import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
-
-dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const API_KEY = process.env.WEATHERSTACK_API_KEY;
+const API_KEY = '0bdc56b1a0c72c03711ba645a649363d';
 
-if (!API_KEY) {
-    console.error("Error: WEATHERSTACK_API_KEY is not set in .env file.");
-    process.exit(1);
-}
+// Simple in-memory cache: { "city_name": { data: {...}, timestamp: 123456789 } }
+const cache = new Map();
+const CACHE_DURATION = 10 * 60 * 1000; // 10 minutes in milliseconds
 
 app.use(cors());
 app.use(express.static('public'));
@@ -29,6 +25,20 @@ app.get('/api/weather', async (req, res) => {
         return res.status(400).json({ error: 'City is required' });
     }
 
+    const normalizedCity = city.toLowerCase().trim();
+
+    // Check Cache
+    if (cache.has(normalizedCity)) {
+        const { data, timestamp } = cache.get(normalizedCity);
+        if (Date.now() - timestamp < CACHE_DURATION) {
+            console.log(`Serving ${city} from cache`);
+            return res.json(data);
+        } else {
+            console.log(`Cache expired for ${city}`);
+            cache.delete(normalizedCity);
+        }
+    }
+
     try {
         console.log(`Fetching weather for ${city}...`);
         const response = await axios.get(
@@ -37,15 +47,24 @@ app.get('/api/weather', async (req, res) => {
         console.log('Weatherstack response received:', response.status);
 
         const data = response.data;
-        console.log('Data:', JSON.stringify(data).substring(0, 200));
+        // console.log('Data:', JSON.stringify(data).substring(0, 200));
 
         if (data.error) {
             console.error('API Error:', data.error);
-            return res.status(401).json({ error: data.error.info || 'Error fetching weather data' });
+            // Handle specific Weatherstack errors
+            if (data.error.code === 104) {
+                return res.status(429).json({ error: 'Monthly usage limit reached. Please upgrade plan or try again later.' });
+            }
+            if (data.error.code === 601) {
+                return res.status(404).json({ error: 'City not found. Please try another location.' }); // Missing query
+            }
+            if (data.error.code === 615) {
+                return res.status(404).json({ error: 'City request failed. Recheck the spelling.' }); // Request failed
+            }
+            return res.status(400).json({ error: data.error.info || 'Error fetching weather data' });
         }
 
         // Transform Weatherstack data to match our frontend structure partially
-        // Note: Weatherstack free tier does NOT assume forecast, so we return empty list
         const weatherData = {
             current: {
                 name: data.location.name,
@@ -60,7 +79,7 @@ app.get('/api/weather', async (req, res) => {
                 },
                 weather: [
                     {
-                        main: data.current.weather_descriptions[0], // Use description as main for simplicity or map it
+                        main: data.current.weather_descriptions[0],
                         description: data.current.weather_descriptions[0]
                     }
                 ]
@@ -68,11 +87,20 @@ app.get('/api/weather', async (req, res) => {
             forecast: [] // No forecast in free tier
         };
 
-        console.log('Sending weatherData:', JSON.stringify(weatherData).substring(0, 200));
+        // Save to Cache
+        cache.set(normalizedCity, { data: weatherData, timestamp: Date.now() });
+        console.log(`Cached data for ${city}`);
+
+        console.log('Sending weatherData');
         res.json(weatherData);
 
     } catch (error) {
         console.error('Server Error:', error.message);
+        if (error.response) {
+            // The request was made and the server responded with a status code
+            // that falls out of the range of 2xx
+            return res.status(error.response.status).json({ error: 'Provider Error: ' + error.response.statusText });
+        }
         res.status(500).json({ error: 'Server error fetching weather data' });
     }
 });
